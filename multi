@@ -1,0 +1,93 @@
+def ARTIFACTS = [:]
+properties([parameters([[$class: 'ChoiceParameter', choiceType: 'PT_SINGLE_SELECT', description: 'Please select the APP Name', filterLength: 1, filterable: false, name: 'APP', randomName: 'choice-parameter-8444550835786792', script: [$class: 'GroovyScript', fallbackScript: [classpath: [], sandbox: false, script: 'return [\'app-error\']'], script: [classpath: [], sandbox: false, script: 'return [\'cloud-config-svc:selected\',\'auth-svc\',\'metadata-svc\',\'smarts-consumer-svc\',\'exposure-svc\',\'discovery-svc\',\'sl-plugin-discovery-openstack\',\'sl-plugin-discovery-maas\',\'sl-plugin-discovery-juju\',\'sl-plugin-discovery-contrail\',\'sl-plugin-discovery-smarts\',\'sl-plugin-discovery-infinidat\',\'sl-plugin-discovery-tenantdashboard\',\'sl-plugin-discovery-victoriametrics\']']]], [$class: 'CascadeChoiceParameter', choiceType: 'PT_SINGLE_SELECT', description: 'Please select the NS to be deployed ', filterLength: 1, filterable: false, name: 'NS', randomName: 'choice-parameter-8444550840750438', referencedParameters: 'APP', script: [$class: 'GroovyScript', fallbackScript: [classpath: [], sandbox: false, script: 'return [\'ns-error\']'], script: [classpath: [], sandbox: false, script: '''return ['dev','test']''']]], [$class: 'CascadeChoiceParameter', choiceType: 'PT_SINGLE_SELECT', description: 'Please select the SCM URL ', filterLength: 1, filterable: false, name: 'SCM_URL', randomName: 'choice-parameter-8444550845132307', referencedParameters: 'APP', script: [$class: 'GroovyScript', fallbackScript: [classpath: [], sandbox: false, script: 'return [\'scm-url-error\']'], script: [classpath: [], sandbox: false, script: '''if (APP.contains("sl-plugin")) {
+return ["https://gitlab.agile.nat.bt.com/NCMONIT/backend-services/plugins/"]
+} else {
+return ["https://gitlab.agile.nat.bt.com/NCMONIT/backend-services/"]
+}''']]], choice(choices: ['sprint-38', 'sprint-39', 'sprint-40', '1.0.0'], description: 'Please select the Branch to be deployed', name: 'BRANCH'),string(name: 'REGISTRY', defaultValue:  'registry.docker.nat.bt.com' , description: 'Docker registry to push built images to'),string(name: 'REPOSITORY', defaultValue:  'nc-monitoring' , description: 'Prefix or the Repository name for the container image'),string(name: 'ARCHIVE_PATTERN', defaultValue:  'docker-compose.yaml' , description: 'Ant fileset pattern to archive artifacts')])])
+pipeline {
+    agent any
+    stages {
+        stage('checkout') {
+            steps {
+                    deleteDir()
+                    script {
+                        def scm = checkout(scm: [$class: 'GitSCM', branches: [[name: params.BRANCH]], userRemoteConfigs: [[credentialsId: 'ncmonpa', url: params.SCM_URL+params.APP+".git"]]])
+                        scm.each {
+                            key,value -> env["${key}"] = "${value}";
+                        }
+                        env['GIT_SHA'] = scm['GIT_COMMIT'][0..7]
+                        def temp = sh script: 'pwd', returnStdout: true
+                        env['WORKSPACE'] =  temp.trim()
+                        currentBuild.displayName = "#${env.BUILD_NUMBER}-${params.APP}-${params.BRANCH}-${env.GIT_SHA}"
+                    }
+                                       
+                 }
+        }
+        stage('Build') {
+            when {
+                expression { fileExists('pom.xml') }
+            }
+            steps {
+                configFileProvider([configFile(fileId: 'global-maven-config', variable: 'MAVEN_SETTINGS')]) {
+                    script {
+                            env['MAVEN_SETTINGS']=MAVEN_SETTINGS
+                            //withSonarQubeEnv() {
+                                //withMaven(globalMavenSettingsConfig: 'global-maven-config', jdk: 'openjdk-11', maven: 'apache-maven-3.6.3') {
+                                withMaven(jdk: 'openjdk-11', maven: 'apache-maven-3.6.3') {
+                                   // sh "mvn clean install -U"
+                                    sh "mvn -s ${MAVEN_SETTINGS} -DskipTests clean install -U"
+                                    //sh "mvn -s ${MAVEN_SETTINGS} clean install sonar:sonar -U"
+                                //}
+                            //env['POM_ARTIFACTID'] = sh script: 'mvn -s ${MAVEN_SETTINGS} help:evaluate -Dexpression=project.artifactId -q -DforceStdout', returnStdout: true
+                            //env['POM_GROUPID'] = sh script: 'mvn -s ${MAVEN_SETTINGS} help:evaluate -Dexpression=project.groupId -q -DforceStdout', returnStdout: true
+                            //env['POM_VERSION'] = sh script: 'mvn -s ${MAVEN_SETTINGS} help:evaluate -Dexpression=project.version -q -DforceStdout', returnStdout: true
+                            //env['POM_PACKAGING'] = sh script: 'mvn -s ${MAVEN_SETTINGS} help:evaluate -Dexpression=project.packaging -q -DforceStdout', returnStdout: true
+                            }
+                    }
+                }
+            }
+            /*post {
+                success{
+                    script {
+                         ARTIFACTS['maven'] = [[
+                                                    'groupId' : env['POM_GROUPID'] ,
+                                                    'artifactId': env['POM_ARTIFACTID'] ,
+                                                    'version': env['POM_VERSION'] ,
+                                                    'classifier': env['POM_PACKAGING']
+                                                ]]
+                    }
+                }
+            }*/
+        }
+        /*stage("Quality Gate") {
+            steps {
+              timeout(time: 1, unit: 'HOURS') {
+                waitForQualityGate abortPipeline: true
+              }
+            }
+         }*/
+         stage('Publish') {
+             parallel {            
+                stage('Nexus IQ') {
+                    when {
+                        branch 'master'
+                    }
+                    steps {
+                        nexusPolicyEvaluation advancedProperties: '', failBuildOnNetworkError: false, iqApplication: "${params.APP}" , iqStage: 'build', jobCredentialsId: 'nexus'
+                    }
+                }       
+                stage('Deploy') {
+                  /*  when {
+                        branch 'master'
+                    } */
+                    steps {
+                        withMaven(globalMavenSettingsConfig: 'global-maven-config', jdk: 'openjdk-11', maven: 'apache-maven-3.6.3') {
+                            //sh "export PATH=$MVN_CMD_DIR:$PATH && mvn -DskipTests deploy"
+                            sh "echo maven path: $MVN_CMD_DIR"
+                        }
+                    }
+                }
+             }
+         }
+    }
+}
